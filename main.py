@@ -1,247 +1,117 @@
-import struct
+import argparse
 import pygame
-import random
-import math
-from math import *
-from pygame.locals import *
 
-import moderngl
+from rendering import CircleRenderer, PostProcessor, make_surface
+from simulation import Simulation
 
-pygame.init()
-
-FPS = 60
-clock = pygame.time.Clock()
-
-import tkinter as tk
-root = tk.Tk()
-WIDTH: int = int(root.winfo_screenwidth())
-HEIGHT: int = int(root.winfo_screenheight())
-print(int(root.winfo_screenwidth()))
-
-VIRTUAL_RES = (WIDTH // 1, HEIGHT // 1)
-REAL_RES = (WIDTH, HEIGHT)
-
-WIDTH = VIRTUAL_RES[0]
-HEIGHT = VIRTUAL_RES[1]
-
-screen = pygame.Surface(VIRTUAL_RES).convert((255, 65280, 16711680, 0))
-pygame.display.set_mode(REAL_RES, DOUBLEBUF | OPENGL)
-
-ctx = moderngl.create_context()
-
-texture_coordinates = [0, 1, 1, 1,
-                       0, 0, 1, 0]
-
-world_coordinates = [-1, -1, 1, -1,
-                     -1, 1, 1, 1]
-
-render_indices = [0, 1, 2,
-                  1, 2, 3]
-
-prog = ctx.program(
-    vertex_shader=open("vertex_shaders.glsl").read(),
-    fragment_shader=open("fragment_shaders.glsl").read()
-)
-
-screen_texture = ctx.texture(
-    VIRTUAL_RES, 3,
-    pygame.image.tostring(screen, "RGB", 1))
-
-screen_texture.repeat_x = False
-screen_texture.repeat_y = False
-
-vbo = ctx.buffer(struct.pack('8f', *world_coordinates))
-uvmap = ctx.buffer(struct.pack('8f', *texture_coordinates))
-ibo = ctx.buffer(struct.pack('6I', *render_indices))
-
-vao_content = [
-    (vbo, '2f', 'vert'),
-    (uvmap, '2f', 'in_text')
-]
-
-vao = ctx.vertex_array(prog, vao_content, ibo)
+FIXED_STEP = 1 / 60
 
 
-def rescale(img):
-    current_size = img.get_rect().size
-    transformed_size = (int((current_size[0] / 1920) * WIDTH), int((current_size[1] / 1080) * HEIGHT))
-    transformed_img = pygame.transform.scale(img, transformed_size)
-    return transformed_img
-
-
-def _randomColor():
-    red = random.randint(0, 255)
-    green = random.randint(0, 255)
-    blue = random.randint(0, 255)
-    return (red, green, blue)
-
-
-def distance(x1, y1, x2, y2):
-    return sqrt(pow(x1 - x2, 2) + pow(y1 - y2, 2))
-
-
-def rotate(velocity, angle):
-    rotatedVel = {
-        "x": velocity["x"] * cos(angle) - velocity["y"] * sin(angle),
-        "y": velocity["x"] * sin(angle) + velocity["y"] * cos(angle)
-    }
-    return rotatedVel
-
-
-def collide(particle1, particle2):
-    xVelDiff = particle1.velocity["x"] - particle2.velocity["x"]
-    yVelDiff = particle1.velocity["y"] - particle2.velocity["y"]
-    xDiff = particle2.x - particle1.x
-    yDiff = particle2.y - particle1.y
-
-    if xVelDiff * xDiff + yVelDiff * yDiff >= 0:
-        angle = -1 * atan2(yDiff, xDiff)
-        m1 = particle1.mass
-        m2 = particle2.mass
-        vel1 = rotate(particle1.velocity, angle)
-        vel2 = rotate(particle2.velocity, angle)
-        updatedVel1 = {"x": vel1["x"] * (m1 - m2) / (m1 + m2) + 2 * vel2["x"] * m2 / (m1 + m2), "y": vel1["y"]}
-        updatedVel2 = {"x": vel2["x"] * (m2 - m1) / (m1 + m2) + 2 * vel1["x"] * m1 / (m1 + m2), "y": vel2["y"]}
-        finalVel1 = rotate(updatedVel1, -angle)
-        finalVel2 = rotate(updatedVel2, -angle)
-        particle1.velocity = finalVel1
-        particle2.velocity = finalVel2
-
-class Circle():
-    def __init__(self, particles):
-        _resConst = VIRTUAL_RES[0] / 1920
-        self.radius = random.randint(int(20 * _resConst), int(50 * _resConst))
-        self.x = self.radius + random.randint(0, WIDTH - 2 * self.radius)
-        self.y = self.radius + random.randint(0, HEIGHT - 2 * self.radius)
-        self.velocity = {"x": (random.random() - 0.5) * _resConst * 5, "y": (random.random() - 0.5) * _resConst * 5}
-        self.color = _randomColor()
-        self.mass = self.radius / 30
-        self.alpha = 0
-
-        if len(particles) != 0:
-            i = 0
-            while i < len(particles):
-                if (distance(self.x, self.y, particles[i].x, particles[i].y) - (self.radius + particles[i].radius)) <= 0:
-                    self.x = self.radius + random.randint(0, WIDTH - 2 * self.radius)
-                    self.y = self.radius + random.randint(0, HEIGHT - 2 * self.radius)
-                    i = -1
-                i += 1
-
-    def draw(self, surface) -> None:
-        circle_surface = pygame.Surface((2 * self.radius, 2 * self.radius))
-        circle_surface.set_colorkey((0, 0, 0))
-        circle_surface.set_alpha(self.alpha)
-        pygame.draw.circle(circle_surface, self.color, (self.radius, self.radius), self.radius)
-        surface.blit(circle_surface, (self.x - self.radius, self.y - self.radius))
-        pygame.draw.circle(surface, self.color, (self.x, self.y), self.radius, width=3)
-
-    def update(self, particles, j, mouse_pos, mouse_pressed) -> None:
-
-        for i in range(j + 1, len(particles)):
-            if self == particles[i]: continue
+class App:
+    def __init__(self, size=None, count=100, seed=None, postprocessing=True):
+        self.post = None
+        self.context = None
+        self.closed = False
+        pygame.init()
+        try:
+            self.size = tuple(size or pygame.display.get_desktop_sizes()[0])
+            self.simulation = Simulation(self.size, count, seed)
+            if postprocessing:
+                import moderngl
+                pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
+                pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, 3)
+                pygame.display.gl_set_attribute(pygame.GL_CONTEXT_PROFILE_MASK,
+                                                pygame.GL_CONTEXT_PROFILE_CORE)
+                pygame.display.gl_set_attribute(pygame.GL_CONTEXT_FLAGS,
+                                                pygame.GL_CONTEXT_FORWARD_COMPATIBLE_FLAG)
+                self.window = pygame.display.set_mode(self.size, pygame.OPENGL | pygame.DOUBLEBUF)
+                try:
+                    self.context = moderngl.create_context(require=330)
+                    self.post = PostProcessor(self.context, self.size)
+                except moderngl.Error as error:
+                    raise RuntimeError(f"OpenGL initialization failed: {error}") from error
             else:
-                if (distance(self.x, self.y, particles[i].x, particles[i].y) - (self.radius + particles[i].radius)) < 0:
-                    collide(self, particles[i])
+                self.window = pygame.display.set_mode(self.size)
+            pygame.display.set_caption("Circle collisions")
+            self.surface = make_surface(self.size)
+            self.renderer = CircleRenderer(self.simulation.circles)
+            self.clock = pygame.time.Clock()
+            self.accumulator = 0.0
+            self.running = True
+            self.mouse = (-1000, -1000)
+            self.pressed = False
+        except Exception:
+            self.close()
+            raise
 
-        if self.x - self.radius <= 0 or self.x + self.radius >= WIDTH:
-            self.velocity["x"] = -1 * self.velocity["x"]
-        if self.y - self.radius <= 0 or self.y + self.radius >= HEIGHT:
-            self.velocity["y"] = -1 * self.velocity["y"]
-
-        self.x += self.velocity["x"]
-        self.y += self.velocity["y"]
-
-        mouse_dis = distance(mouse_pos[0], mouse_pos[1], self.x, self.y)
-        _resConst = VIRTUAL_RES[0] / 1920
-        if (mouse_dis) < 300 * _resConst:
-            self.alpha = min(map_val(mouse_dis, 300 * _resConst, 100 * _resConst, 1, 255), 255)
-            if mouse_pressed:
-                self.velocity["x"] += 4 * (copysign(1, self.x - mouse_pos[0]) * (300 - abs(self.x - mouse_pos[0]))) / 300
-                self.velocity["y"] += 4 * (copysign(1, self.y - mouse_pos[1]) * (300 - abs(self.y - mouse_pos[1]))) / 300
-        else:
-            self.alpha = 0
-
-
-def map_val(x, a, b, c, d):
-
-    val = (x-a)/((b-a)/(d-c))+c
-
-    return val
-
-
-def render():
-    texture_data = screen.get_view("1")
-    screen_texture.write(texture_data)
-    ctx.clear(14 / 255, 40 / 255, 66 / 255)
-    screen_texture.use()
-    vao.render()
-    pygame.display.flip()
-
-
-def main(surface):
-    particles = []
-    for i in range(100):
-        particle = Circle(particles)
-        particles.append(particle)
-
-    mouse_pos = (-100, -100)
-    mouse_pressed = False
-
-    run: bool = True
-    while run:
-
-        mouse_pressed = False
+    def events(self):
         for event in pygame.event.get():
-
-            if event.type == pygame.QUIT:
-                run = False
-                pygame.display.quit()
-
-            if event.type == pygame.KEYDOWN:
-
-                if event.key == pygame.K_F1:
-                    run = False
-                    pygame.display.quit()
-
-            if event.type == pygame.MOUSEMOTION:
-                mouse_pos: tuple[int] = pygame.mouse.get_pos()
-                mouse_pos = (mouse_pos[0] / REAL_RES[0] * VIRTUAL_RES[0],
-                             mouse_pos[1] / REAL_RES[1] * VIRTUAL_RES[1])
-
-            if event.type == pygame.MOUSEBUTTONDOWN:
-                mouse_pos: tuple[int] = pygame.mouse.get_pos()
-                mouse_pos = (mouse_pos[0] / REAL_RES[0] * VIRTUAL_RES[0],
-                             mouse_pos[1] / REAL_RES[1] * VIRTUAL_RES[1])
-
+            if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN
+                    and event.key in (pygame.K_ESCAPE, pygame.K_F1)):
+                self.running = False
+            elif event.type == pygame.MOUSEMOTION:
+                self.mouse = event.pos
+            elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP):
+                self.mouse = event.pos
                 if event.button == 1:
-                    mouse_pressed = True
+                    self.pressed = event.type == pygame.MOUSEBUTTONDOWN
+            elif event.type in (pygame.WINDOWFOCUSLOST, pygame.WINDOWLEAVE):
+                self.pressed = False
+                self.mouse = (-1000, -1000)
 
-            if event.type == pygame.MOUSEBUTTONUP:
-                mouse_pos: tuple[int] = pygame.mouse.get_pos()
-                mouse_pos = (mouse_pos[0] / REAL_RES[0] * VIRTUAL_RES[0],
-                             mouse_pos[1] / REAL_RES[1] * VIRTUAL_RES[1])
+    def frame(self, elapsed):
+        self.events()
+        if not self.running:
+            return False
+        self.accumulator += min(max(elapsed, 0), 0.25)
+        stepped = False
+        while self.accumulator + 1e-12 >= FIXED_STEP:
+            self.simulation.update(FIXED_STEP, self.mouse, self.pressed)
+            self.accumulator -= FIXED_STEP
+            stepped = True
+        # Update the cursor fade even on frames without a physics step.
+        if not stepped:
+            self.simulation.update(0, self.mouse)
+        self.renderer.draw(self.surface)
+        if self.post is not None:
+            self.post.draw(self.surface)
+        else:
+            self.window.blit(self.surface, (0, 0))
+        pygame.display.flip()
+        return True
 
-                if event.button == 1:
-                    mouse_pressed = False
+    def run(self):
+        while self.frame(self.clock.tick(60) / 1000):
+            pass
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        if self.post is not None:
+            self.post.close()
+        if self.context is not None:
+            self.context.release()
+        pygame.quit()
 
 
-        surface.fill((10, 10, 10))
-        for particle in particles:
-            particle.draw(surface)
-        for i in range(len(particles)):
-            particles[i].update(particles, i, mouse_pos, mouse_pressed)
-
-        if mouse_pressed and False:
-            particle = Circle(particles)
-            particle.x, particle.y = mouse_pos
-            particles.append(particle)
-
-        #pygame.display.update()
-
-        render()
-        clock.tick(FPS)
+def main():
+    parser = argparse.ArgumentParser(description="Moving circles with curved-screen postprocessing")
+    parser.add_argument("--count", type=int, default=100)
+    parser.add_argument("--size", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"))
+    parser.add_argument("--seed", type=int, help="repeat a starting arrangement")
+    parser.add_argument("--no-postprocessing", action="store_true", help="use the software renderer")
+    args = parser.parse_args()
+    app = None
+    try:
+        app = App(args.size, args.count, args.seed, not args.no_postprocessing)
+        app.run()
+    except (pygame.error, RuntimeError, ImportError, ValueError) as error:
+        parser.exit(1, f"Cannot start: {error}\nTry --no-postprocessing if OpenGL is unavailable.\n")
+    finally:
+        if app is not None:
+            app.close()
 
 
 if __name__ == "__main__":
-    main(screen)
-    pygame.quit()
+    main()

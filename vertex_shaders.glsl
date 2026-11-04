@@ -1,4 +1,4 @@
-#version 300 es
+#version 330 core
 in vec2 vert;
 in vec2 in_text;
 out vec2 v_text;
